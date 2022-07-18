@@ -1,10 +1,24 @@
+/*
+* Notes on the implementation:
+* The map and reduce tasks output is written to a global file system rather than a local file system.
+* this implementation works on a single machine but will fail if run on clusters.
+* Extra communication mechanism needs to be implemented to achieve this.
+ */
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
+import (
+	"fmt"
+	"hash/fnv"
+	"log"
+	"net/rpc"
+	"time"
+)
 
+var (
+	numReduceTasks int
+)
+
+const waitDurationMs = 50
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,7 +38,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
@@ -33,38 +46,104 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	// worker processes ask for the number of reduce task when they are spawned
+	askForNumTasks()
+	for {
+		// ask the coordinator for a task
+		reply := askForMapReduceTask()
+		// perform the indicated task
+		canExit := performTask(reply, mapf, reducef)
+		// if we can exit after reading the task, break out of the loop
+		if canExit {
+			break
+		}
+	}
+	log.Println("Worker Exiting")
 
 }
 
 //
-// example function to show how to make an RPC call to the coordinator.
+// Calls the RPC to ask the coordinator for the number of tasks
 //
-// the RPC argument and reply types are defined in rpc.go.
+// This function will be called whenevr the worker is initialized
 //
-func CallExample() {
-
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
-	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.Y)
-	} else {
-		fmt.Printf("call failed!\n")
+func askForNumTasks() {
+	args := GetNumReduceTasksArgs{}
+	reply := GetNumReduceTasksReply{}
+	ok := call("Coordinator.GetNumReduceTasks", &args, &reply)
+	if !ok {
+		log.Fatal("Error calling GetNumReduceTasks()")
 	}
+	numReduceTasks = reply.NumReduceTasks
+	log.Printf("Number of reduce tasks is %v\n", numReduceTasks)
+}
+
+//
+// Calls the RPC to ask the coordinator for a task
+//
+// Return: A reply indicating the action that should be taken.
+// 	reply.Task <- the type of the task
+//	reply.TaskDetail <- details that are associated to this task
+func askForMapReduceTask() AskForMapReduceTaskReply {
+	args := AskForMapReduceTaskArgs{}
+	reply := AskForMapReduceTaskReply{}
+	ok := call("Coordinator.AskForMapReduceTask", &args, &reply)
+	if !ok {
+		return AskForMapReduceTaskReply{LoseConnTask, []string{}}
+	}
+	log.Println("Receive a task from coordinator")
+	return reply
+}
+
+//
+// Take specific action based on the reply
+//
+// Return: whether the worker can exit after performing the task
+//
+func performTask(reply AskForMapReduceTaskReply, mapf func(string, string) []KeyValue, reducef func(string, []string) string) bool {
+	if reply.Task == MapTask {
+		log.Printf("Receive Map Task on filename %v", reply.TaskDetail[0])
+		doMapTask(mapf, reply.TaskDetail[0])
+		return false
+	} else if reply.Task == ReduceTask {
+		log.Printf("Receive Map Task on filename %v to %v", reply.TaskDetail[0], reply.TaskDetail[len(reply.TaskDetail)-1])
+		doReduceTask(reducef, reply.TaskDetail)
+		return false
+	} else if reply.Task == WaitTask {
+		log.Println("Receive Wait Task")
+		doWaitTask()
+		return false
+	} else if reply.Task == ExitTask {
+		log.Println("Receive Exit Task")
+		return true
+	} else if reply.Task == LoseConnTask {
+		log.Println("Cannot connect to coordinator")
+		return true
+	} else {
+		log.Println("Receive Unknown Task")
+		return true
+	}
+}
+
+//
+// When the corrdinator instructs to do map task, perform the maptask on the file
+//
+func doMapTask(mapf func(string, string) []KeyValue, filename string) {
+
+}
+
+//
+// When the corrdinator instructs to do reduce task, perform the redice tasks on the files
+//
+func doReduceTask(reducef func(string, []string) string, filenames []string) {
+
+}
+
+//
+// When the corrdinator instructs to wait, wait for fixed amount of milisecond
+//
+func doWaitTask() {
+	<-time.After(waitDurationMs * time.Millisecond)
 }
 
 //
