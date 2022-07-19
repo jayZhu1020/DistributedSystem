@@ -43,11 +43,9 @@ func ihash(key string) int {
 //
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-
-	// Your worker implementation here.
-
 	// worker processes ask for the number of reduce task when they are spawned
 	askForNumTasks()
+	// repeat forever until we can exit
 	for {
 		// ask the coordinator for a task
 		reply := askForMapReduceTask()
@@ -89,7 +87,7 @@ func askForMapReduceTask() AskForMapReduceTaskReply {
 	reply := AskForMapReduceTaskReply{}
 	ok := call("Coordinator.AskForMapReduceTask", &args, &reply)
 	if !ok {
-		return AskForMapReduceTaskReply{LoseConnTask, []string{}}
+		return AskForMapReduceTaskReply{LoseConnTask, -1, []string{}}
 	}
 	log.Println("Receive a task from coordinator")
 	return reply
@@ -103,11 +101,14 @@ func askForMapReduceTask() AskForMapReduceTaskReply {
 func performTask(reply AskForMapReduceTaskReply, mapf func(string, string) []KeyValue, reducef func(string, []string) string) bool {
 	if reply.Task == MapTask {
 		log.Printf("Receive Map Task on filename %v", reply.TaskDetail[0])
-		doMapTask(mapf, reply.TaskDetail[0])
-		return false
+		doMapTask(mapf, reply.TaskDetail)
+		reportTaskDone(reply)
+		return true // CHANGE TO FALSE WHEN TESTING IS DONE
+		// return false
 	} else if reply.Task == ReduceTask {
 		log.Printf("Receive Map Task on filename %v to %v", reply.TaskDetail[0], reply.TaskDetail[len(reply.TaskDetail)-1])
 		doReduceTask(reducef, reply.TaskDetail)
+		reportTaskDone(reply)
 		return false
 	} else if reply.Task == WaitTask {
 		log.Println("Receive Wait Task")
@@ -128,7 +129,7 @@ func performTask(reply AskForMapReduceTaskReply, mapf func(string, string) []Key
 //
 // When the corrdinator instructs to do map task, perform the maptask on the file
 //
-func doMapTask(mapf func(string, string) []KeyValue, filename string) {
+func doMapTask(mapf func(string, string) []KeyValue, filenames []string) {
 
 }
 
@@ -144,6 +145,13 @@ func doReduceTask(reducef func(string, []string) string, filenames []string) {
 //
 func doWaitTask() {
 	<-time.After(waitDurationMs * time.Millisecond)
+}
+
+//
+// When the corrdinator instructs to wait, wait for fixed amount of milisecond
+//
+func reportTaskDone(prevReply AskForMapReduceTaskReply) {
+
 }
 
 //
