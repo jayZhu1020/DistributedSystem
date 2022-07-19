@@ -9,8 +9,10 @@ package mr
 import (
 	"fmt"
 	"hash/fnv"
+	"io/ioutil"
 	"log"
 	"net/rpc"
+	"os"
 	"time"
 )
 
@@ -100,14 +102,14 @@ func askForMapReduceTask() AskForMapReduceTaskReply {
 //
 func performTask(reply AskForMapReduceTaskReply, mapf func(string, string) []KeyValue, reducef func(string, []string) string) bool {
 	if reply.Task == MapTask {
-		log.Printf("Receive Map Task on filename %v", reply.TaskDetail[0])
-		doMapTask(mapf, reply.TaskDetail)
+		log.Printf("Receive Map Task on filename %v\n", reply.TaskDetail[0])
+		doMapTask(mapf, reply)
 		reportTaskDone(reply)
 		return true // CHANGE TO FALSE WHEN TESTING IS DONE
 		// return false
 	} else if reply.Task == ReduceTask {
-		log.Printf("Receive Map Task on filename %v to %v", reply.TaskDetail[0], reply.TaskDetail[len(reply.TaskDetail)-1])
-		doReduceTask(reducef, reply.TaskDetail)
+		log.Printf("Receive Map Task on filename %v to %v\n", reply.TaskDetail[0], reply.TaskDetail[len(reply.TaskDetail)-1])
+		doReduceTask(reducef, reply)
 		reportTaskDone(reply)
 		return false
 	} else if reply.Task == WaitTask {
@@ -129,14 +131,64 @@ func performTask(reply AskForMapReduceTaskReply, mapf func(string, string) []Key
 //
 // When the corrdinator instructs to do map task, perform the maptask on the file
 //
-func doMapTask(mapf func(string, string) []KeyValue, filenames []string) {
+func doMapTask(mapf func(string, string) []KeyValue, reply AskForMapReduceTaskReply) {
+	// open the input files
+	fileName := reply.TaskDetail[0]
+	file, err := os.Open(fileName)
+	if err != nil {
+		log.Fatalf("Cannot open file %v\n", fileName)
+	}
+	// read the input file
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("Cannot read %v\n", fileName)
+	}
+	// close the opened file
+	if err := file.Close(); err != nil {
+		log.Fatalf("Cannot close file %v\n", fileName)
+	}
+
+	// create nReduce temp map output file
+	mapOutFiles := []*os.File{}
+	for outReduceId := 0; outReduceId < numReduceTasks; outReduceId++ {
+		currMapOutFileName := fmt.Sprintf(MapOutFileFormat, reply.Taskid, outReduceId)
+		currMapOutFile, err := ioutil.TempFile("", currMapOutFileName)
+		if err != nil {
+			log.Fatalf("error creating temp file %v\n", currMapOutFileName)
+		}
+		mapOutFiles = append(mapOutFiles, currMapOutFile)
+	}
+
+	// perform map reduce
+	intermediate := mapf(fileName, string(content))
+
+	// append to the output file based on the hash,
+	// the output file has the format
+	/*
+		key1 val1
+		key2 val2
+		...
+		keyn valn
+	*/
+	for _, kvPair := range intermediate {
+		targetReduceId := ihash(kvPair.Key) % numReduceTasks
+		writtenBytes := []byte(fmt.Sprintf("%s %s\n", kvPair.Key, kvPair.Value))
+		_, err := mapOutFiles[targetReduceId].Write(writtenBytes)
+		if err != nil {
+			log.Fatalf("Unable to write to file %v\n", fmt.Sprintf(MapOutFileFormat, reply.Taskid, targetReduceId))
+		}
+	}
+
+	// close the files
+
+	// rename the files
 
 }
 
 //
 // When the corrdinator instructs to do reduce task, perform the redice tasks on the files
 //
-func doReduceTask(reducef func(string, []string) string, filenames []string) {
+func doReduceTask(reducef func(string, []string) string, reply AskForMapReduceTaskReply) {
 
 }
 
@@ -153,6 +205,10 @@ func doWaitTask() {
 func reportTaskDone(prevReply AskForMapReduceTaskReply) {
 
 }
+
+//
+// When the corrdinator instructs to wait, wait for fixed amount of milisecond
+//
 
 //
 // send an RPC request to the coordinator, wait for the response.
