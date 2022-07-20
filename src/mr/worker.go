@@ -172,17 +172,27 @@ func doMapTask(mapf func(string, string) []KeyValue, reply AskForMapReduceTaskRe
 	*/
 	for _, kvPair := range intermediate {
 		targetReduceId := ihash(kvPair.Key) % numReduceTasks
-		writtenBytes := []byte(fmt.Sprintf("%s %s\n", kvPair.Key, kvPair.Value))
-		_, err := mapOutFiles[targetReduceId].Write(writtenBytes)
+		// writtenBytes := []byte(fmt.Sprintf("%s %s\n", kvPair.Key, kvPair.Value))
+		// _, err := mapOutFiles[targetReduceId].Write(writtenBytes)
+		_, err := fmt.Fprintf(mapOutFiles[targetReduceId], "%s %s\n", kvPair.Key, kvPair.Value)
 		if err != nil {
-			log.Fatalf("Unable to write to file %v\n", fmt.Sprintf(MapOutFileFormat, reply.Taskid, targetReduceId))
+			log.Fatalf("Unable to write to temp file of %v\n", fmt.Sprintf(MapOutFileFormat, reply.Taskid, targetReduceId))
 		}
 	}
 
-	// close the files
-
-	// rename the files
-
+	// close and rename the files
+	for outReduceId, file := range mapOutFiles {
+		tempName := file.Name()
+		targetName := fmt.Sprintf(MapOutFileFormat, reply.Taskid, outReduceId)
+		err = file.Close()
+		if err != nil {
+			log.Fatalf("Unable to close file %v\n", tempName)
+		}
+		err := os.Rename(tempName, targetName)
+		if err != nil {
+			log.Fatalf("Unable to rename file %v\n", targetName)
+		}
+	}
 }
 
 //
