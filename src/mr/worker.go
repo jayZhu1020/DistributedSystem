@@ -21,7 +21,7 @@ var (
 	numReduceTasks int
 )
 
-const waitDurationMs = 50
+const waitDurationSecond = 15
 
 //
 // Map functions return a slice of KeyValue.
@@ -260,10 +260,10 @@ func doReduceTask(reducef func(string, []string) string, reply AskForMapReduceTa
 }
 
 //
-// When the corrdinator instructs to wait, wait for fixed amount of milisecond
+// When the corrdinator instructs to wait, wait for fixed amount of seconds
 //
 func doWaitTask() {
-	<-time.After(waitDurationMs * time.Millisecond)
+	<-time.After(waitDurationSecond * time.Second)
 }
 
 //
@@ -277,6 +277,13 @@ func reportTaskDone(prevReply AskForMapReduceTaskReply) {
 	if !ok {
 		log.Fatalln("Unable to talk to coordinator")
 	}
+	switch prevReply.TaskType {
+	case MapTask:
+		log.Printf("report map task ")
+	case ReduceTask:
+		log.Printf("report reduce task ")
+	}
+	log.Printf("report task ")
 }
 
 //

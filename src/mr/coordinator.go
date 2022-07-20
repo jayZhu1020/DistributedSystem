@@ -19,25 +19,8 @@ import (
 	"time"
 )
 
-// Stack data structure
-type stack []int
-
-func (stk *stack) push(i int) {
-	*stk = append(*stk, i)
-}
-
-func (stk *stack) pop() (int, bool) {
-	if len(*stk) == 0 {
-		return -1, false
-	}
-	lastidx := len(*stk) - 1
-	ret := (*stk)[lastidx]
-	*stk = (*stk)[:lastidx]
-	return ret, true
-}
-
 // maximum second the coordinator can be idle
-const maxIdleSecond = 15
+const maxIdleSecond = 20
 
 const checkTaskDelaySecond = 10
 
@@ -225,7 +208,9 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 	c.coordLock.Lock()
 	defer c.coordLock.Unlock()
-	ret := !c.lastActiveTime.IsZero() && time.Since(c.lastActiveTime).Seconds() > maxIdleSecond
+	isOverMaxIdleTime := !c.lastActiveTime.IsZero() && time.Since(c.lastActiveTime).Seconds() > maxIdleSecond
+	finishedAllTask := countStatus(c.mapTasksStatus, done) == c.numMapTasks && countStatus(c.reduceTasksStatus, done) == c.numReduceTasks
+	ret := isOverMaxIdleTime || finishedAllTask
 	if ret {
 		log.Printf("time elapse since last active time in second: %v, ", time.Since(c.lastActiveTime).Seconds())
 		log.Printf("Coordinator exiting")
@@ -265,7 +250,7 @@ func findFirstWithStatus(list map[int]int, status int) int {
 //
 func logStatus(m map[int]int) {
 	for k, v := range m {
-		log.Printf("taskId: %v, status: %v\n", k, intToStringStatus[v])
+		log.Printf("taskId: %v, status: %v, ", k, intToStringStatus[v])
 	}
 }
 
@@ -308,9 +293,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		for _, mapFile := range mapFiles {
 			log.Printf("%v ", mapFile)
 		}
-		log.Println("")
 	}
-	log.Println("")
 
 	// log the reduce tasks
 	log.Printf("Reduce tasks:\n")
@@ -319,7 +302,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		for _, reduceFile := range reduceFiles {
 			log.Printf("%v ", reduceFile)
 		}
-		log.Println("")
 	}
 	c.server()
 	return &c
