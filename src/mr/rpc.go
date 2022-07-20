@@ -1,3 +1,10 @@
+/*
+* Intermediate file structure:
+* key1 val1
+* key2 val2
+* ...
+* keyN valN
+ */
 package mr
 
 //
@@ -25,12 +32,12 @@ const (
 //
 // the map output structure
 //
-const MapOutFileFormat = "mr-mapout-%v-%v" // fmt.Sprintf(MapOutFileFormat, mapId, reduceId)
+const MapOutFileFormat = "mr-intout-%v-%v" // fmt.Sprintf(MapOutFileFormat, mapId, reduceId)
 
 //
 // the reduce output structure
 //
-const ReduceOutFileFormat = "mr-reduceout-%v"
+const ReduceOutFileFormat = "mr-out-%v"
 
 //
 // Args and reply structure for c.GetNumReduceTasks()
@@ -47,8 +54,8 @@ type GetNumReduceTasksReply struct {
 type AskForMapReduceTaskArgs struct{}
 
 type AskForMapReduceTaskReply struct {
-	Task   int // being MapTask, ReduceTask, ExitTask or WaitTask or LoseConnTask
-	Taskid int // task id, used to report back to the coordinator
+	TaskType int // being MapTask, ReduceTask, ExitTask or WaitTask or LoseConnTask
+	TaskId   int // task id, used to report back to the coordinator
 	// task detail.
 	// For a map task it will contain a single file name.
 	// E.g. "pg-being_ernest.txt"
@@ -61,8 +68,8 @@ type AskForMapReduceTaskReply struct {
 // Args and reply structure for c.ReportTaskDone()
 //
 type ReportTaskDoneArgs struct {
-	taskType int
-	taskID   int
+	TaskType int
+	TaskId   int
 }
 
 type ReportTaskDoneReply struct{}

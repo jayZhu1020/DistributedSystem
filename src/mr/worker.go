@@ -7,6 +7,7 @@
 package mr
 
 import (
+	"bufio"
 	"fmt"
 	"hash/fnv"
 	"io/ioutil"
@@ -89,7 +90,7 @@ func askForMapReduceTask() AskForMapReduceTaskReply {
 	reply := AskForMapReduceTaskReply{}
 	ok := call("Coordinator.AskForMapReduceTask", &args, &reply)
 	if !ok {
-		return AskForMapReduceTaskReply{LoseConnTask, -1, []string{}}
+		return AskForMapReduceTaskReply{TaskType: LoseConnTask}
 	}
 	log.Println("Receive a task from coordinator")
 	return reply
@@ -101,28 +102,26 @@ func askForMapReduceTask() AskForMapReduceTaskReply {
 // Return: whether the worker can exit after performing the task
 //
 func performTask(reply AskForMapReduceTaskReply, mapf func(string, string) []KeyValue, reducef func(string, []string) string) bool {
-	if reply.Task == MapTask {
+	switch reply.TaskType {
+	case MapTask:
 		log.Printf("Receive Map Task on filename %v\n", reply.TaskDetail[0])
 		doMapTask(mapf, reply)
-		reportTaskDone(reply)
-		return true // CHANGE TO FALSE WHEN TESTING IS DONE
-		// return false
-	} else if reply.Task == ReduceTask {
+		return false
+	case ReduceTask:
 		log.Printf("Receive Map Task on filename %v to %v\n", reply.TaskDetail[0], reply.TaskDetail[len(reply.TaskDetail)-1])
 		doReduceTask(reducef, reply)
-		reportTaskDone(reply)
 		return false
-	} else if reply.Task == WaitTask {
+	case WaitTask:
 		log.Println("Receive Wait Task")
 		doWaitTask()
 		return false
-	} else if reply.Task == ExitTask {
+	case ExitTask:
 		log.Println("Receive Exit Task")
 		return true
-	} else if reply.Task == LoseConnTask {
+	case LoseConnTask:
 		log.Println("Cannot connect to coordinator")
 		return true
-	} else {
+	default:
 		log.Println("Receive Unknown Task")
 		return true
 	}
@@ -148,19 +147,19 @@ func doMapTask(mapf func(string, string) []KeyValue, reply AskForMapReduceTaskRe
 		log.Fatalf("Cannot close file %v\n", fileName)
 	}
 
+	// perform map reduce
+	intermediate := mapf(fileName, string(content))
+
 	// create nReduce temp map output file
 	mapOutFiles := []*os.File{}
 	for outReduceId := 0; outReduceId < numReduceTasks; outReduceId++ {
-		currMapOutFileName := fmt.Sprintf(MapOutFileFormat, reply.Taskid, outReduceId)
+		currMapOutFileName := fmt.Sprintf(MapOutFileFormat, reply.TaskId, outReduceId)
 		currMapOutFile, err := ioutil.TempFile("", currMapOutFileName)
 		if err != nil {
-			log.Fatalf("error creating temp file %v\n", currMapOutFileName)
+			log.Fatalf("cannot create temp file %v\n", currMapOutFileName)
 		}
 		mapOutFiles = append(mapOutFiles, currMapOutFile)
 	}
-
-	// perform map reduce
-	intermediate := mapf(fileName, string(content))
 
 	// append to the output file based on the hash,
 	// the output file has the format
@@ -172,34 +171,92 @@ func doMapTask(mapf func(string, string) []KeyValue, reply AskForMapReduceTaskRe
 	*/
 	for _, kvPair := range intermediate {
 		targetReduceId := ihash(kvPair.Key) % numReduceTasks
-		// writtenBytes := []byte(fmt.Sprintf("%s %s\n", kvPair.Key, kvPair.Value))
-		// _, err := mapOutFiles[targetReduceId].Write(writtenBytes)
+		// write output to file, where key and value are separated by space and different key value pairs are separated by newline
 		_, err := fmt.Fprintf(mapOutFiles[targetReduceId], "%s %s\n", kvPair.Key, kvPair.Value)
 		if err != nil {
-			log.Fatalf("Unable to write to temp file of %v\n", fmt.Sprintf(MapOutFileFormat, reply.Taskid, targetReduceId))
+			log.Fatalf("cannot write to temp file of %v\n", fmt.Sprintf(MapOutFileFormat, reply.TaskId, targetReduceId))
 		}
 	}
 
 	// close and rename the files
 	for outReduceId, file := range mapOutFiles {
 		tempName := file.Name()
-		targetName := fmt.Sprintf(MapOutFileFormat, reply.Taskid, outReduceId)
+		targetName := fmt.Sprintf(MapOutFileFormat, reply.TaskId, outReduceId)
 		err = file.Close()
 		if err != nil {
-			log.Fatalf("Unable to close file %v\n", tempName)
+			log.Fatalf("cannot close file %v\n", tempName)
 		}
 		err := os.Rename(tempName, targetName)
 		if err != nil {
-			log.Fatalf("Unable to rename file %v\n", targetName)
+			log.Fatalf("cannot rename file %v\n", targetName)
 		}
 	}
+
+	// task is done, instruct the coordinator
+	reportTaskDone(reply)
 }
 
 //
 // When the corrdinator instructs to do reduce task, perform the redice tasks on the files
 //
 func doReduceTask(reducef func(string, []string) string, reply AskForMapReduceTaskReply) {
+	// read the intermediate map output file and store into a data strcutre
+	reduceFileNames := reply.TaskDetail
+	keyToList := make(map[string][]string)
+	for _, name := range reduceFileNames {
+		// open intermediate file
+		mapIntermediateFile, err := os.Open(name)
+		if err != nil {
+			log.Fatalf("cannot open file %v\n", name)
+		}
+		scanner := bufio.NewScanner(mapIntermediateFile)
+		// read the content line by line
+		for scanner.Scan() {
+			// extract key-val pairs
+			var key, val string
+			currText := scanner.Text()
+			_, err := fmt.Sscanf(currText, "%s %s\n", &key, &val)
+			if err != nil {
+				log.Fatalf("cannot scan string %v", currText)
+			}
+			keyToList[key] = append(keyToList[key], val)
+		}
+		// close the file
+		err = mapIntermediateFile.Close()
+		if err != nil {
+			log.Fatalf("cannot close file %v\n", name)
+		}
+	}
+	// perform map on each key and output to a slice
+	reduceResults := make(map[string]string)
+	for key, values := range keyToList {
+		currReduceResult := reducef(key, values)
+		reduceResults[key] = currReduceResult
+	}
+	// create a temp output file
+	reduceOutputFileName := fmt.Sprintf(ReduceOutFileFormat, reply.TaskId)
+	reduceOutputFile, err := ioutil.TempFile("", reduceOutputFileName)
+	reduceTempFileName := reduceOutputFile.Name()
+	if err != nil {
+		log.Fatalf("cannot create temp file %v\n", reduceTempFileName)
+	}
+	// write to that file
+	for reduceKey, reduceResult := range reduceResults {
+		fmt.Fprintf(reduceOutputFile, "%s %s\n", reduceKey, reduceResult)
+	}
+	// close the file
+	err = reduceOutputFile.Close()
+	if err != nil {
+		log.Fatalf("cannot close temp file %v\n", reduceTempFileName)
+	}
+	// rename the file
+	err = os.Rename(reduceTempFileName, reduceOutputFileName)
+	if err != nil {
+		log.Fatalf("cannot rename %s\n", reduceTempFileName)
+	}
 
+	// report to the coordinator
+	reportTaskDone(reply)
 }
 
 //
@@ -213,7 +270,13 @@ func doWaitTask() {
 // When the corrdinator instructs to wait, wait for fixed amount of milisecond
 //
 func reportTaskDone(prevReply AskForMapReduceTaskReply) {
-
+	args := ReportTaskDoneArgs{}
+	args.TaskType = prevReply.TaskType
+	args.TaskId = prevReply.TaskId
+	ok := call("Coordinator.ReportTaskDone", &args, &ReportTaskDoneReply{})
+	if !ok {
+		log.Fatalln("Unable to talk to coordinator")
+	}
 }
 
 //

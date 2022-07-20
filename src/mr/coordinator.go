@@ -9,7 +9,6 @@
 package mr
 
 import (
-	"container/list"
 	"fmt"
 	"log"
 	"net"
@@ -48,9 +47,15 @@ const (
 	done
 )
 
+var intToStringStatus = map[int]string{
+	idle:    "idle",
+	ongoing: "ongoing",
+	done:    "done",
+}
+
 type Coordinator struct {
-	idleMapTasksIds   list.List // encode in integers 0, ..., nFiles-1
-	idleRduceTasksIds list.List // encocde in integers 0 ..., nReduce-1
+	mapTasksIds    []int // encode in integers 0, ..., nFiles-1
+	reduceTasksIds []int // encocde in integers 0 ..., nReduce-1
 
 	mapTaskIdToFiles    map[int][]string // associate map task id to the task filenames
 	reduceTaskIdToFiles map[int][]string // associate reduce task id to the reduce filenames
@@ -77,6 +82,7 @@ func (c *Coordinator) GetNumReduceTasks(args *GetNumReduceTasksArgs, reply *GetN
 	defer c.coordLock.Unlock()
 	c.lastActiveTime = time.Now()
 	reply.NumReduceTasks = c.numReduceTasks
+	log.Printf("worker asks for reduce task number at %v\n", c.lastActiveTime)
 	log.Printf("Reply to worker with number of reduce tasks being %v\n", c.numReduceTasks)
 	return nil
 }
@@ -88,10 +94,55 @@ func (c *Coordinator) AskForMapReduceTask(args *AskForMapReduceTaskArgs, reply *
 	c.coordLock.Lock()
 	defer c.coordLock.Unlock()
 	c.lastActiveTime = time.Now()
-	log.Printf("askForMapReduceTask called at %v\n", c.lastActiveTime)
+	log.Printf("worker asks for task at time %v\n", c.lastActiveTime)
 
 	// **TODO:** TO BE IMPLEMENTED
 
+	// if still idle map task left, assign a map task
+	if countStatus(c.mapTasksStatus, idle) > 0 {
+		assignedTaskId := findFirstWithStatus(c.mapTasksStatus, idle)
+		reply.TaskType = MapTask
+		reply.TaskId = assignedTaskId
+		reply.TaskDetail = c.mapTaskIdToFiles[assignedTaskId]
+		c.mapTasksStatus[assignedTaskId] = ongoing
+		go c.checkTaskDone(reply.TaskType, reply.TaskId)
+
+		log.Printf("assigned worker a map task with ID %v\n", reply.TaskId)
+		log.Println("current status of map tasks:")
+		logStatus(c.mapTasksStatus)
+		return nil
+	}
+	// if all map tasks are assigned with some ongoing tasks
+	// instruct the worker to wait
+	if countStatus(c.mapTasksStatus, ongoing) > 0 {
+		log.Printf("all map tasks are ongoing, instruct the worker to wait\n")
+		reply.TaskType = WaitTask
+		return nil
+	}
+	// otherwise all map tasks must have been done.
+	// check if any reduce task left
+	if countStatus(c.reduceTasksStatus, idle) > 0 {
+		assignedTaskId := findFirstWithStatus(c.reduceTasksStatus, idle)
+		reply.TaskType = ReduceTask
+		reply.TaskId = assignedTaskId
+		reply.TaskDetail = c.reduceTaskIdToFiles[assignedTaskId]
+		c.reduceTasksStatus[assignedTaskId] = ongoing
+		go c.checkTaskDone(reply.TaskType, reply.TaskId)
+		log.Printf("assigned worker a reduce task with ID %v\n", reply.TaskId)
+		log.Println("current status of reduce tasks:")
+		logStatus(c.reduceTasksStatus)
+		return nil
+	}
+	// otherwise all reduces tasks are done.
+	// ask the worker to wait until we are sure all tasks are done
+	if countStatus(c.reduceTasksStatus, ongoing) > 0 {
+		log.Printf("all reduce tasks are ongoing, instruct the worker to wait\n")
+		reply.TaskType = WaitTask
+		return nil
+	}
+	// otherwise all map and reduce tasks are done. Assign an exit task
+	log.Printf("all mapreduce tasks are done, instruct the worker to exit\n")
+	reply.TaskType = ExitTask
 	return nil
 }
 
@@ -99,30 +150,54 @@ func (c *Coordinator) AskForMapReduceTask(args *AskForMapReduceTaskArgs, reply *
 // Report the work done with some filename
 //
 func (c *Coordinator) ReportTaskDone(args *ReportTaskDoneArgs, reply *ReportTaskDoneReply) error {
-
+	c.coordLock.Lock()
+	defer c.coordLock.Unlock()
+	c.lastActiveTime = time.Now()
 	// **TODO:** TO BE IMPLEMENTED
+	log.Printf("worker reports task finished at time %v\n", c.lastActiveTime)
+	if args.TaskType == MapTask {
+		log.Printf("map task %v finished\n", args.TaskType)
+		c.mapTasksStatus[args.TaskId] = done
+		return nil
+	}
+	if args.TaskType == ReduceTask {
+		log.Printf("reduce task %v finished\n", args.TaskType)
+		c.reduceTasksStatus[args.TaskId] = done
+		return nil
+	}
 
+	log.Fatalln("Unknown task reported")
 	return nil
 }
 
 //
-// Report the work done with some filename
+// Check if the task is done after some second
+// if it is still ongoing for a long period of time,
+// it might be that the worker is down or hardly making progress
+// then reset the task status to idle.
 //
 func (c *Coordinator) checkTaskDone(taskType int, taskId int) {
-	c.coordLock.Lock()
-	defer c.coordLock.Unlock()
 	<-time.After(checkTaskDelaySecond * time.Second)
 
+	c.coordLock.Lock()
+	defer c.coordLock.Unlock()
 	// **TODO:** TO BE IMPLEMENTED
-
 	if taskType == MapTask {
+		log.Printf("Check the task status of map task %v\n", taskId)
 		if c.mapTasksStatus[taskId] == ongoing {
-
+			log.Printf("map task %v timeout, reset to idle\n", taskId)
+			c.mapTasksStatus[taskId] = idle
+			return
 		}
-	} else if taskType == ReduceTask {
+		log.Printf("map task %v successfully performed within timeout\n", taskId)
+	} else {
+		log.Printf("Check the task status of reduce task %v\n", taskId)
 		if c.reduceTasksStatus[taskId] == ongoing {
-
+			log.Printf("reduce task %v timeout, reset to idle\n", taskId)
+			c.reduceTasksStatus[taskId] = idle
+			return
 		}
+		log.Printf("reduce task %v successfully performed within timeout\n", taskId)
 	}
 }
 
@@ -151,7 +226,47 @@ func (c *Coordinator) Done() bool {
 	c.coordLock.Lock()
 	defer c.coordLock.Unlock()
 	ret := !c.lastActiveTime.IsZero() && time.Since(c.lastActiveTime).Seconds() > maxIdleSecond
+	if ret {
+		log.Printf("time elapse since last active time in second: %v, ", time.Since(c.lastActiveTime).Seconds())
+		log.Printf("Coordinator exiting")
+	}
 	return ret
+}
+
+//
+// helper function that counts how many elements in the list
+// is in a particular status
+//
+func countStatus(list map[int]int, status int) int {
+	count := 0
+	for _, v := range list {
+		if v == status {
+			count++
+		}
+	}
+	return count
+}
+
+//
+// helper function that counts how many elements in the list
+// is in a particular status
+//
+func findFirstWithStatus(list map[int]int, status int) int {
+	for k, v := range list {
+		if v == status {
+			return k
+		}
+	}
+	return -1
+}
+
+//
+// helper functon that logs the task status
+//
+func logStatus(m map[int]int) {
+	for k, v := range m {
+		log.Printf("taskId: %v, status: %v\n", k, intToStringStatus[v])
+	}
 }
 
 //
@@ -160,28 +275,31 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	// initialize variables
+	// initialize containers and integer counts
 	c := Coordinator{}
 	c.numReduceTasks = nReduce
 	c.numMapTasks = len(files)
-	c.idleMapTasksIds = *list.New()
-	c.idleRduceTasksIds = *list.New()
 	c.mapTaskIdToFiles = make(map[int][]string)
 	c.reduceTaskIdToFiles = make(map[int][]string)
 	c.mapTasksStatus = make(map[int]int)
 	c.reduceTasksStatus = make(map[int]int)
+
+	// initialize map tasks
 	for mapTaskIndex, mapTask := range files {
-		c.idleMapTasksIds.PushBack(mapTaskIndex)
+		c.mapTasksIds = append(c.mapTasksIds, mapTaskIndex)
 		c.mapTasksStatus[mapTaskIndex] = idle
 		c.mapTaskIdToFiles[mapTaskIndex] = append(c.mapTaskIdToFiles[mapTaskIndex], mapTask)
 	}
-	for reduceId := 0; reduceId < nReduce; reduceId++ {
-		c.idleRduceTasksIds.PushBack(reduceId)
-		c.reduceTasksStatus[reduceId] = idle
+
+	// initialize reduce tasks
+	for reduceTaskId := 0; reduceTaskId < nReduce; reduceTaskId++ {
+		c.reduceTasksIds = append(c.reduceTasksIds, reduceTaskId)
+		c.reduceTasksStatus[reduceTaskId] = idle
 		for mapId := 0; mapId < c.numMapTasks; mapId++ {
-			c.reduceTaskIdToFiles[reduceId] = append(c.reduceTaskIdToFiles[reduceId], fmt.Sprintf(MapOutFileFormat, mapId, reduceId))
+			c.reduceTaskIdToFiles[reduceTaskId] = append(c.reduceTaskIdToFiles[reduceTaskId], fmt.Sprintf(MapOutFileFormat, mapId, reduceTaskId))
 		}
 	}
+
 	// log the map tasks
 	log.Printf("Initialize coordinator with %v map tasks and %v reduce tasks\n", c.numMapTasks, c.numReduceTasks)
 	log.Printf("Map tasks:\n")
@@ -193,6 +311,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		log.Println("")
 	}
 	log.Println("")
+
 	// log the reduce tasks
 	log.Printf("Reduce tasks:\n")
 	for reduceId, reduceFiles := range c.reduceTaskIdToFiles {
